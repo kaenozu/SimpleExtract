@@ -16,6 +16,9 @@ import subprocess
 import traceback
 import urllib.request
 import urllib.error
+import atexit
+import logging
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 from datetime import datetime
 
 import time
@@ -110,50 +113,105 @@ FONT_FAMILY_JP_FALLBACK = "BIZ UDGothic"
 FONT_FAMILY_EN = "Segoe UI"
 FONT_FALLBACK = "Meiryo UI"
 
+# --- システム設定の保存/復元 ---
+_original_font_settings = {}  # enable_font_antialiasing で変更前の値を保存
+
+def _restore_font_settings():
+    """アプリ起動前に保存したフォント関連のシステム設定を復元する。"""
+    orig = _original_font_settings
+    if not orig:
+        return
+    SPI_SETFONTSMOOTHING = 0x004B
+    SPI_SETFONTSMOOTHINGTYPE = 0x200B
+    SPIF_UPDATEINIFILE = 0x01
+    SPIF_SENDCHANGE = 0x02
+    # SystemParametersInfo の復元
+    if "font_smoothing" in orig:
+        try:
+            ctypes.windll.user32.SystemParametersInfoW(
+                SPI_SETFONTSMOOTHING, int(orig["font_smoothing"]),
+                None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+        except Exception: pass
+    if "font_smoothing_type" in orig:
+        try:
+            ctypes.windll.user32.SystemParametersInfoW(
+                SPI_SETFONTSMOOTHINGTYPE, int(orig["font_smoothing_type"]),
+                None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+        except Exception: pass
+    # レジストリの復元
+    if "reg_FontSmoothing" in orig:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop",
+                                0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, "FontSmoothing", 0, winreg.REG_SZ,
+                                  orig["reg_FontSmoothing"])
+                winreg.SetValueEx(k, "FontSmoothingType", 0, winreg.REG_DWORD,
+                                  orig["reg_FontSmoothingType"])
+        except Exception: pass
+
+atexit.register(_restore_font_settings)
+
+
 def enable_font_antialiasing(root=None):
-    """ClearType/アンチエイリアスを有効化 & DPIを調整"""
+    """ClearType/アンチエイリアスを有効化 & DPIを調整。
+    変更前の値を保存し、アプリ終了時に atexit で復元する。"""
+    global _original_font_settings
+    SPI_SETFONTSMOOTHING = 0x004B
+    SPI_SETFONTSMOOTHINGTYPE = 0x200B
+    FE_FONTSMOOTHINGCLEARTYPE = 0x0002
+    SPIF_UPDATEINIFILE = 0x01
+    SPIF_SENDCHANGE = 0x02
+    # --- 変更前の値を保存 ---
+    try:
+        buf = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.SystemParametersInfoW(SPI_SETFONTSMOOTHING, 0, ctypes.byref(buf), 0)
+        _original_font_settings["font_smoothing"] = buf.value
+    except Exception: pass
+    try:
+        buf = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, ctypes.byref(buf), 0)
+        _original_font_settings["font_smoothing_type"] = buf.value
+    except Exception: pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0,
+                            winreg.KEY_READ) as k:
+            _original_font_settings["reg_FontSmoothing"], _ = winreg.QueryValueEx(k, "FontSmoothing")
+            _original_font_settings["reg_FontSmoothingType"], _ = winreg.QueryValueEx(k, "FontSmoothingType")
+    except Exception: pass
     # 1. DPI Awareness - PerMonitor (1) の方が分数スケーリングでギザつきにくい
     try:
-        # 2 = PerMonitorV2 はシャープだが分数スケーリングでギザつくことがあるため、1を試す
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
-    except:
+    except Exception:
         try: ctypes.windll.user32.SetProcessDPIAware()
-        except: pass
+        except Exception: pass
     # 2. ClearTypeフォントスムージングを有効化 (SPI_SETFONTSMOOTHING)
     try:
-        SPI_SETFONTSMOOTHING = 0x004B
-        SPI_SETFONTSMOOTHINGTYPE = 0x200B
-        FE_FONTSMOOTHINGCLEARTYPE = 0x0002
-        SPIF_UPDATEINIFILE = 0x01
-        SPIF_SENDCHANGE = 0x02
         ctypes.windll.user32.SystemParametersInfoW(SPI_SETFONTSMOOTHING, 1, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
         ctypes.windll.user32.SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, FE_FONTSMOOTHINGCLEARTYPE, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
-    except: pass
+    except Exception: pass
     # 3. GDIフォントスムージングをレジストリでも有効化
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE) as k:
             winreg.SetValueEx(k, "FontSmoothing", 0, winreg.REG_SZ, "2")
             winreg.SetValueEx(k, "FontSmoothingType", 0, winreg.REG_DWORD, 2)
-    except: pass
+    except Exception: pass
     # 4. Tkのスケーリング - 分数スケーリングはギザつくので1.0に固定し、Windowsに任せる
     if root is not None:
         try:
-            # 分数スケーリングを避けるため1.0固定（最も滑らか）
             root.tk.call('tk', 'scaling', 1.0)
             ctk.set_widget_scaling(1.0)
             ctk.set_window_scaling(1.0)
-        except: pass
+        except Exception: pass
         # Tkフォントのレンダリングを滑らかに - BIZ UDGothicに置換、サイズを1pt大きく
         try:
             for name in ["TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkCaptionFont"]:
                 f = tkfont.nametofont(name)
                 f.configure(family=FONT_FAMILY_JP, size=10)
-        except: pass
+        except Exception: pass
         # 追加: GDIのテキストレンダリングを高品質に
         try:
-            # フォントスムージングを再適用（即時反映）
             ctypes.windll.gdi32.SetTextCharacterExtra(ctypes.windll.user32.GetDC(0), 0)
-        except: pass
+        except Exception: pass
 
 def get_font(family=None, size=11, weight="normal"):
     """アンチエイリアス対応のCTkFontを生成"""
@@ -161,7 +219,7 @@ def get_font(family=None, size=11, weight="normal"):
     fam = family or FONT_FAMILY_JP
     try:
         return ctk.CTkFont(family=fam, size=size, weight=weight)
-    except:
+    except Exception:
         return ctk.CTkFont(family=FONT_FALLBACK, size=size, weight=weight)
 
 # --- テーマカラー ---
@@ -205,7 +263,7 @@ def get_exe_icon() -> str:
 
 def notify_shell_change():
     try: ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
-    except: pass
+    except Exception: pass
 
 # ── タスクバー & インジケーター ──
 class TaskbarProgress:
@@ -257,62 +315,105 @@ class TaskbarProgress:
                 self.taskbar.SetProgressState(self.hwnd, state)
             if total > 0:
                 self.taskbar.SetProgressValue(self.hwnd, int(value), int(total))
-        except: pass
+        except Exception: pass
     def set_state(self, state):
         if self.taskbar and self.hwnd:
             try: self.taskbar.SetProgressState(self.hwnd, state)
-            except: pass
+            except Exception: pass
     def clear(self):
         self.set_state(self.TBPF_NOPROGRESS)
 
 class IndicatorDot:
-    """ヘッダー用 ステータスドット（パルス）"""
+    """ヘッダー用 ステータスドット（パルスアニメーション付き）"""
+    _COLORS = {"idle": "#64748b", "running": "#2b6ff0", "done": "#16a34a", "error": "#ef4444"}
+    _PULSE_COLORS = ("#3b82f6", "#1d4ed8")  # 交互に点滅する2色
+    _PULSE_INTERVAL_MS = 500  # 点滅間隔（ms）
+
     def __init__(self, parent, size=14):
         bg = current_colors()["CARD"]
-        self.canvas = tk.Canvas(parent, width=size, height=size, highlightthickness=0, bg=bg, bd=0)
-        self.size=size
-        self.state="idle"
-        self._pulse_after=None
+        self.canvas = tk.Canvas(parent, width=size, height=size,
+                                highlightthickness=0, bg=bg, bd=0)
+        self.size = size
+        self.state = "idle"
+        self._pulse_after = None
+        self._pulse_tick = 0
         self.draw("idle")
-    def draw(self, state):
-        self.state=state
-        c=self.canvas
+
+    def draw(self, state, color=None):
+        """ドットを描画。color を省略则 state から自動選択。"""
+        self.state = state
+        c = self.canvas
         c.delete("all")
-        colors={"idle":"#64748b", "running":"#2b6ff0", "done":"#16a34a", "error":"#ef4444"}
-        col=colors.get(state, "#94a3b8")
-        s=self.size
-        c.create_oval(1,1,s-1,s-1, fill=col, outline="")
-        if state=="running":
-            c.create_oval(s*0.3,s*0.3,s*0.7,s*0.7, fill="white", outline="")
+        col = color or self._COLORS.get(state, "#94a3b8")
+        s = self.size
+        c.create_oval(1, 1, s - 1, s - 1, fill=col, outline="")
+        if state == "running":
+            c.create_oval(s * 0.3, s * 0.3, s * 0.7, s * 0.7,
+                          fill="white", outline="")
+
+    # ── パルスアニメーション ──
+
     def pulse(self, enable=True):
+        """enable=True で点滅開始、False で停止。"""
+        self._cancel_pulse()
         if enable:
-            self.draw("running")
-            # 簡易パルス: 500msごとに明滅
-            def toggle():
-                if self.state!="running": return
-                cur=self.canvas.itemcget("oval", "fill") if False else None
-                # 色を少し変える
-                self.canvas.delete("all")
-                import random
-                # 交互に濃淡
-                col = "#3b82f6" if self.canvas.winfo_exists() and hash(str(id(self)))%2 else "#1d4ed8"
-                # 実際は単純に再描画
-                self.draw("running")
-                # 再スケジュールは親が管理
-            # 親のafterで管理するためここでは何もしない
-            pass
+            self._pulse_tick = 0
+            self._schedule_pulse()
         else:
-            if self._pulse_after:
-                try: self.canvas.after_cancel(self._pulse_after)
-                except: pass
-    def pack(self, **kw): self.canvas.pack(**kw)
-    def configure(self, **kw): pass
+            # 停止時は running の通常色で再描画
+            self.draw("running")
+
+    def _cancel_pulse(self):
+        if self._pulse_after is not None:
+            try:
+                self.canvas.after_cancel(self._pulse_after)
+            except Exception:
+                pass
+            self._pulse_after = None
+
+    def _schedule_pulse(self):
+        """次のティックをスケジュールする。"""
+        self._pulse_after = self.canvas.after(
+            self._PULSE_INTERVAL_MS, self._pulse_tick_fn)
+
+    def _pulse_tick_fn(self):
+        """1ティック分のアニメーションを実行し、次をスケジュール。"""
+        if self.state != "running":
+            self._pulse_after = None
+            return
+        # 交互に2色を切り替え
+        color = self._PULSE_COLORS[self._pulse_tick % 2]
+        self._pulse_tick += 1
+        self.draw("running", color=color)
+        self._schedule_pulse()
+
+    def pack(self, **kw):
+        self.canvas.pack(**kw)
+
+    def configure(self, **kw):
+        pass
 
 # ── Config ──
+class _BatchContext:
+    """コンテキストマネージャ: バッチ中の save() を抑制"""
+    def __init__(self, config):
+        self._config = config
+    def __enter__(self):
+        self._config._batch_depth += 1
+        return self
+    def __exit__(self, *exc):
+        self._config._batch_depth -= 1
+        if self._config._batch_depth == 0 and self._config._dirty:
+            self._config._dirty = False
+            self._config.save()
+
+
 class ConfigManager:
     def __init__(self):
         self.dir = os.path.join(os.getenv("APPDATA") or os.path.expanduser("~"), "SimpleExtract")
         self.path = os.path.join(self.dir, "config.json")
+        self._batch_depth = 0
+        self._dirty = False
         self.data = {
             "dest_mode": "same", "custom_dest": "", "open_folder": True,
             "delete_after": False, "overwrite_mode": "smart",  # smart/overwrite/skip
@@ -326,23 +427,40 @@ class ConfigManager:
                 with open(self.path, "r", encoding="utf-8") as f:
                     d = json.load(f)
                     self.data.update(d)
-        except: pass
+        except Exception: pass
     def save(self):
         try:
             os.makedirs(self.dir, exist_ok=True)
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
-        except: pass
+        except Exception: pass
     def get(self, k, default=None): return self.data.get(k, default)
-    def set(self, k, v): self.data[k]=v; self.save()
+    def set(self, k, v):
+        self.data[k] = v
+        if self._batch_depth > 0:
+            self._dirty = True
+        else:
+            self.save()
+    def batch(self):
+        """with CONFIG.batch(): で囲むと、中での set() は即保存されず、
+        コンテキスト離脱時にまとめて1回だけ save() される。"""
+        return _BatchContext(self)
     def add_history(self, archive, dest, ok):
         h = {"archive": os.path.basename(archive), "path": archive, "dest": dest,
              "time": datetime.now().strftime("%Y-%m-%d %H:%M"), "ok": ok}
         hist = self.data.get("history", [])
         hist.insert(0, h)
         self.data["history"] = hist[:30]
-        self.save()
-    def clear_history(self): self.data["history"]=[]; self.save()
+        if self._batch_depth > 0:
+            self._dirty = True
+        else:
+            self.save()
+    def clear_history(self):
+        self.data["history"] = []
+        if self._batch_depth > 0:
+            self._dirty = True
+        else:
+            self.save()
 
 CONFIG = ConfigManager()
 
@@ -358,7 +476,11 @@ class AssociationManager:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}") as k:
                 v,_=winreg.QueryValueEx(k,""); return v==AssociationManager._progid(ext)
-        except: return False
+        except FileNotFoundError: return False
+        except PermissionError:
+            logging.warning("レジストリ読み取り権限がありません: %s", ext); return False
+        except Exception as e:
+            logging.debug("関連付け確認中にエラー (%s): %s", ext, e); return False
     @staticmethod
     def associate(ext):
         progid=AssociationManager._progid(ext)
@@ -385,7 +507,10 @@ class AssociationManager:
                 except OSError:
                     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}",0,winreg.KEY_SET_VALUE) as k:
                         winreg.SetValueEx(k,"",0,winreg.REG_SZ,"")
-        except: pass
+        except PermissionError:
+            logging.warning("関連付けの解除に権限がありません: %s", ext)
+        except Exception as e:
+            logging.warning("関連付け解除中にエラー (%s): %s", ext, e)
         def del_tree(root, sub):
             try:
                 with winreg.OpenKey(root, sub) as k:
@@ -393,16 +518,20 @@ class AssociationManager:
                         try: s=winreg.EnumKey(k,0); del_tree(root, sub+"\\"+s)
                         except OSError: break
                 winreg.DeleteKey(root, sub)
-            except: pass
+            except FileNotFoundError: pass
+            except PermissionError:
+                logging.warning("レジストリキーの削除に権限がありません: %s\\%s", root, sub)
+            except Exception as e:
+                logging.debug("レジストリ掃除中にエラー (%s): %s", sub, e)
         del_tree(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{progid}")
     @staticmethod
     def is_context_menu_enabled():
         try: winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\*\shell\SimpleExtract"); return True
-        except: return False
+        except Exception: return False
     @staticmethod
     def is_submenu_enabled():
         try: winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\*\shell\SimpleExtractSub"); return True
-        except: return False
+        except Exception: return False
     @staticmethod
     def set_context_menu(enable, submenu=False):
         # シンプル版とサブメニュー版
@@ -412,9 +541,13 @@ class AssociationManager:
                 with winreg.OpenKey(root, sub) as k:
                     while True:
                         try: s=winreg.EnumKey(k,0); del_tree(root, sub+"\\"+s)
-                        except: break
+                        except OSError: break
                 winreg.DeleteKey(root, sub)
-            except: pass
+            except FileNotFoundError: pass
+            except PermissionError:
+                logging.warning("レジストリキーの削除に権限がありません: %s\\%s", root, sub)
+            except Exception as e:
+                logging.debug("レジストリ掃除中にエラー (%s): %s", sub, e)
         del_tree(winreg.HKEY_CURRENT_USER, r"Software\Classes\*\shell\SimpleExtract")
         del_tree(winreg.HKEY_CURRENT_USER, r"Software\Classes\*\shell\SimpleExtractSub")
         # CommandStore も掃除
@@ -461,12 +594,18 @@ class AssociationManager:
                 # フォールバック: exeパスを書いたtxtでも
                 if not os.path.exists(lnk):
                     with open(lnk+".txt","w") as f: f.write(exe)
-            except: pass
+            except PermissionError:
+                logging.warning("SendTo ショートカットの作成に権限がありません: %s", lnk)
+            except Exception as e:
+                logging.warning("SendTo ショートカット作成中にエラー: %s", e)
         else:
             try:
                 if os.path.exists(lnk): os.remove(lnk)
                 if os.path.exists(lnk+".txt"): os.remove(lnk+".txt")
-            except: pass
+            except PermissionError:
+                logging.warning("SendTo ショートカットの削除に権限がありません: %s", lnk)
+            except Exception as e:
+                logging.warning("SendTo ショートカット削除中にエラー: %s", e)
 
 # ── Extractor ──
 class Extractor:
@@ -474,6 +613,17 @@ class Extractor:
     # ZipBomb閾値: 100倍 or 10GB
     ZIPBOMB_RATIO = 100
     ZIPBOMB_MAX_UNCOMPRESSED = 10 * 1024 * 1024 * 1024  # 10GB
+
+    @staticmethod
+    def _safe_dest_path(dest_dir, member_name):
+        """アーカイブ内のmember_nameをdest_dir直下に解決し、
+        パストラバーサル（../../etc/passwd 等）を検出する。
+        安全なら解決済みパスを、不正なら None を返す。"""
+        dest_dir = os.path.realpath(dest_dir)
+        target = os.path.realpath(os.path.join(dest_dir, member_name))
+        if not (target == dest_dir or target.startswith(dest_dir + os.sep)):
+            return None
+        return target
 
     @staticmethod
     def list_contents(archive_path, password=None):
@@ -487,7 +637,7 @@ class Extractor:
                         # ファイル名の文字化け対策: cp932試行
                         try:
                             fname = info.filename
-                        except:
+                        except Exception:
                             fname = info.filename
                         results.append((fname, info.file_size, info.is_dir(), info.date_time, encrypted))
             elif lower.endswith(".7z"):
@@ -563,7 +713,7 @@ class Extractor:
                     return None, "プレビュー対象が見つかりません"
                 finally:
                     try: shutil.rmtree(tmp)
-                    except: pass
+                    except Exception: pass
             elif lower.endswith(".rar"):
                 if not _ensure_rarfile(): return None, "rarfile未インストール"
                 import rarfile
@@ -583,7 +733,7 @@ class Extractor:
 
     @staticmethod
     def extract(archive_path, dest_dir, password, progress_cb, log_cb):
-        if Extractor.cancel_flag.is_set(): return False,"キャンセルされました"
+        Extractor.cancel_flag.clear()  # 各操作の開始時にリセット（前回の残留を防止）
         os.makedirs(dest_dir,exist_ok=True)
         lower=archive_path.lower()
         # ZipBomb事前チェック
@@ -596,7 +746,7 @@ class Extractor:
                     if log_cb: log_cb(f"⚠️ 警告: 圧縮率が異常に高いです ({total_uncompressed//total_compressed}倍) - ZipBombの可能性")
                 if total_uncompressed > Extractor.ZIPBOMB_MAX_UNCOMPRESSED:
                     return False, f"展開後のサイズが大きすぎます ({human_size(total_uncompressed)} > 10GB) - 中止しました"
-        except: pass
+        except Exception: pass
         try:
             if lower.endswith(".zip"):
                 with zipfile.ZipFile(archive_path,'r') as zf:
@@ -608,22 +758,33 @@ class Extractor:
                             # 部分的に展開されたファイルを掃除
                             return False,"キャンセルされました"
                         if info.is_dir():
-                            # ディレクトリは作成のみ
+                            # ディレクトリは作成のみ（パストラバーサル検証付き）
+                            safe = Extractor._safe_dest_path(dest_dir, info.filename)
+                            if safe is None:
+                                log_cb(f"⚠️ スキップ（パストラバーサル）: {info.filename}")
+                                continue
                             try:
-                                os.makedirs(os.path.join(dest_dir, info.filename), exist_ok=True)
-                            except: pass
+                                os.makedirs(safe, exist_ok=True)
+                            except Exception: pass
+                            continue
+                        # パストラバーサル検証: ../../ 等でアウト側に書き出されないか確認
+                        dest_path = Extractor._safe_dest_path(dest_dir, info.filename)
+                        if dest_path is None:
+                            log_cb(f"⚠️ スキップ（パストラバーサル）: {info.filename}")
+                            done_bytes += info.file_size
+                            if total_bytes > 0 and progress_cb:
+                                progress_cb(int(done_bytes / total_bytes * 100))
                             continue
                         log_cb(f"展開中: {info.filename} ({human_size(info.file_size)})")
                         # ストリーミングで大容量対応（1MBチャンク）
                         try:
-                            dest_path = os.path.join(dest_dir, info.filename)
                             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                             # 上書きチェックは呼び出し側で済ませているが、ここでもサイズで進捗
                             with zf.open(info, pwd=password.encode('utf-8') if password else None) as src, open(dest_path, 'wb') as dst:
                                 while True:
                                     if Extractor.cancel_flag.is_set():
                                         try: dst.close(); os.remove(dest_path)
-                                        except: pass
+                                        except Exception: pass
                                         return False,"キャンセルされました"
                                     chunk = src.read(1024*1024)
                                     if not chunk: break
@@ -654,12 +815,16 @@ class Extractor:
                     done=0
                     for i,m in enumerate(members):
                         if Extractor.cancel_flag.is_set(): return False,"キャンセルされました"
+                        # パストラバーサル検証
+                        dest_path = Extractor._safe_dest_path(dest_dir, m.name)
+                        if dest_path is None:
+                            log_cb(f"⚠️ スキップ（パストラバーサル）: {m.name}")
+                            continue
                         log_cb(f"展開中: {m.name}")
                         # 大容量はストリーミング
                         if m.isfile():
                             f=tf.extractfile(m)
                             if f:
-                                dest_path=os.path.join(dest_dir, m.name)
                                 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                                 with open(dest_path,'wb') as out:
                                     while True:
@@ -685,7 +850,7 @@ class Extractor:
                         while True:
                             if Extractor.cancel_flag.is_set():
                                 try: fout.close(); os.remove(out_path)
-                                except: pass
+                                except Exception: pass
                                 return False,"キャンセルされました"
                             chunk=fin.read(1024*1024)
                             if not chunk: break
@@ -705,7 +870,7 @@ class Extractor:
                         while True:
                             if Extractor.cancel_flag.is_set():
                                 try: fout.close(); os.remove(out_path)
-                                except: pass
+                                except Exception: pass
                                 return False,"キャンセルされました"
                             chunk=fin.read(1024*1024)
                             if not chunk: break
@@ -722,6 +887,11 @@ class Extractor:
                     for i,info in enumerate(members):
                         if Extractor.cancel_flag.is_set(): return False,"キャンセルされました"
                         if info.isdir(): continue
+                        # パストラバーサル検証
+                        if Extractor._safe_dest_path(dest_dir, info.filename) is None:
+                            log_cb(f"⚠️ スキップ（パストラバーサル）: {info.filename}")
+                            done += info.file_size
+                            continue
                         log_cb(f"展開中: {info.filename}")
                         # rarfileはストリーミングが弱いので一括だが、進捗はファイル単位
                         rf.extract(info, path=dest_dir)
@@ -745,7 +915,7 @@ class Compressor:
     cancel_flag = threading.Event()
     @staticmethod
     def compress(files, output_path, fmt="zip", level=5, password=None, progress_cb=None, log_cb=None):
-        if Compressor.cancel_flag.is_set(): return False, "キャンセルされました"
+        Compressor.cancel_flag.clear()  # 各操作の開始時にリセット（前回の残留を防止）
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         try:
             if fmt == "zip":
@@ -910,8 +1080,9 @@ class AssociationWindow(ctk.CTkToplevel):
             for e in sel: AssociationManager.associate(e)
             AssociationManager.set_context_menu(self.var_ctx.get(), submenu=self.var_submenu.get())
             AssociationManager.set_sendto(self.var_sendto.get())
-            CONFIG.set("auto_extract", bool(self.var_auto.get()))
-            CONFIG.set("context_menu", bool(self.var_ctx.get()))
+            with CONFIG.batch():
+                CONFIG.set("auto_extract", bool(self.var_auto.get()))
+                CONFIG.set("context_menu", bool(self.var_ctx.get()))
             notify_shell_change(); self._refresh()
             messagebox.showinfo("完了", f"関連付けました:\n{', '.join(sel)}", parent=self)
         except Exception as e: messagebox.showerror("エラー",str(e), parent=self)
@@ -937,7 +1108,7 @@ class AssociationWindow(ctk.CTkToplevel):
             CONFIG.set("auto_extract", bool(self.var_auto.get()))
             # 右クリック等のチェックは即時反映されていない場合もあるので、ここでも反映
             # ただし拡張子関連付けは「選択を関連付け」ボタンで明示的に適用させる
-        except: pass
+        except Exception: pass
         self.destroy()
 
 class Splash:
@@ -957,7 +1128,7 @@ class Splash:
         self.win.update()
     def close(self):
         try: self.bar.stop(); self.win.destroy()
-        except: pass
+        except Exception: pass
 
 # ── Main App ──
 class SimpleExtractApp(TkinterDnD.Tk):
@@ -969,7 +1140,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
         try:
             self.withdraw()
             _splash = Splash(self)
-        except: _splash = None
+        except Exception: _splash = None
         # 生成後にフォント・スケーリングを適用
         enable_font_antialiasing(self)
         ctk.set_appearance_mode(CONFIG.get("theme","light"))
@@ -1002,7 +1173,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
             self.deiconify()
             self.lift()
             self.focus_force()
-        except: pass
+        except Exception: pass
         # 軽量化: 履歴と圧縮タブは遅延ロード
         self.after(100, self._load_history_ui)
         self.after(500, self._init_taskbar)
@@ -1268,13 +1439,17 @@ class SimpleExtractApp(TkinterDnD.Tk):
                 hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
                 if hwnd == 0:
                     hwnd = self.winfo_id()
-            except: pass
+            except Exception: pass
             self.taskbar = TaskbarProgress(hwnd)
-        except: self.taskbar = None
+        except Exception: self.taskbar = None
     def _set_indicator(self, state, text="", sub=""):
         # state: idle/running/done/error
         try:
-            self.indicator_dot.draw(state)
+            if state == "running":
+                self.indicator_dot.pulse(True)
+            else:
+                self.indicator_dot.pulse(False)
+                self.indicator_dot.draw(state)
             self.indicator_label.configure(text=text or {"idle":"待機中","running":"処理中","done":"完了","error":"エラー"}.get(state, text))
             self.indicator_sub.configure(text=sub)
             # タスクバー連動
@@ -1289,12 +1464,12 @@ class SimpleExtractApp(TkinterDnD.Tk):
                     self.taskbar.set_state(TaskbarProgress.TBPF_ERROR)
                 elif state=="idle":
                     self.taskbar.clear()
-        except: pass
+        except Exception: pass
     def _update_taskbar_progress(self, value, total=100):
         try:
             if self.taskbar:
                 self.taskbar.set_progress(value, total)
-        except: pass
+        except Exception: pass
 
     def toggle_theme(self):
         new = "dark" if CONFIG.get("theme")=="light" else "light"
@@ -1305,28 +1480,29 @@ class SimpleExtractApp(TkinterDnD.Tk):
         self.btn_theme.configure(text="🌙" if new=="light" else "☀️")
 
     def save_settings(self):
-        CONFIG.set("dest_mode", self.dest_mode.get())
-        CONFIG.set("custom_dest", self.custom_dest)
-        CONFIG.set("open_folder", bool(self.var_open_folder.get()))
-        CONFIG.set("delete_after", bool(self.var_delete.get()))
-        CONFIG.set("notifications", bool(self.var_notify.get()))
-        CONFIG.set("organize", bool(self.var_organize.get()))
-        CONFIG.set("overwrite_mode", self.overwrite_var.get())
+        with CONFIG.batch():
+            CONFIG.set("dest_mode", self.dest_mode.get())
+            CONFIG.set("custom_dest", self.custom_dest)
+            CONFIG.set("open_folder", bool(self.var_open_folder.get()))
+            CONFIG.set("delete_after", bool(self.var_delete.get()))
+            CONFIG.set("notifications", bool(self.var_notify.get()))
+            CONFIG.set("organize", bool(self.var_organize.get()))
+            CONFIG.set("overwrite_mode", self.overwrite_var.get())
 
     def on_dest_change(self):
         self.save_settings(); self.update_dest_label()
 
     def _bind_dnd(self):
         try: self.drop_target_register(DND_FILES)
-        except:
+        except Exception:
             try: self.drop_register(DND_FILES)
-            except: pass
+            except Exception: pass
         self.dnd_bind('<<Drop>>', self.on_drop)
         # 圧縮タブのドロップも同じハンドラで処理（タブで分岐）
         try:
             self.c_drop_frame.drop_target_register(DND_FILES)
             self.c_drop_frame.dnd_bind('<<Drop>>', self.on_compress_drop)
-        except: pass
+        except Exception: pass
 
     def log(self, msg):
         self.log_box.configure(state="normal")
@@ -1344,8 +1520,8 @@ class SimpleExtractApp(TkinterDnD.Tk):
             self.after(2500, toast.destroy)
             # システム音
             try: ctypes.windll.user32.MessageBeep(0x00000040)
-            except: pass
-        except: pass
+            except Exception: pass
+        except Exception: pass
 
     def _update_queue_badge(self):
         total = len(self.queue_files) + len(self.compress_files)
@@ -1450,11 +1626,11 @@ class SimpleExtractApp(TkinterDnD.Tk):
             self._update_queue_badge()
         fname=os.path.basename(path)
         try: fsize=os.path.getsize(path)
-        except: fsize=0
+        except Exception: fsize=0
         self.file_label.configure(text=f"📄 {fname}  ({human_size(fsize)})  —  {len(self.queue_files)}件中 {self.queue_files.index(path)+1 if path in self.queue_files else 1}件目", text_color=current_colors()["TEXT"])
         self.log(f"読み込み: {path}"); self.set_status("解析中...");
         try: self.progress.set(0.1)
-        except: pass
+        except Exception: pass
         self.tree.delete(*self.tree.get_children()); self._refresh_queue_ui()
         pw=self.entry_pw.get().strip() or None
         def worker():
@@ -1498,7 +1674,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
             self.tree.insert("", "end", text=f"{icon} {name}", values=(sz, typ), tags=(tag,))
         # 暗号化行を色付け
         try: self.tree.tag_configure("enc", foreground="#dc2626")
-        except: pass
+        except Exception: pass
         if len(items)>500: self.tree.insert("", "end", text=f"... 他 {len(items)-500} 件", values=("-", "-"))
         summary=f"{len(items)}項目  •  合計 {human_size(total_size)}"
         if enc_count: summary+=f"  •  🔒 {enc_count}件暗号化"
@@ -1577,7 +1753,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
                 self.preview_text_box.configure(state="normal"); self.preview_text_box.delete("1.0","end")
                 self.preview_text_box.insert("end", text[:800]); self.preview_text_box.configure(state="disabled")
                 return
-            except:
+            except Exception:
                 pass
         # バイナリ
         self.preview_img_label.configure(text="📦", image="")
@@ -1667,7 +1843,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
                     # おまかせ整理
                     try:
                         do_org = CONFIG.get("organize", False)
-                    except: do_org = False
+                    except Exception: do_org = False
                     if do_org:
                         self.after(0, lambda d=dest_dir: self.organize_extracted(d))
                     if self.var_delete.get() and os.path.exists(arch):
@@ -1701,7 +1877,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
                 messagebox.showinfo("完了", f"{success}件の解凍が完了しました:\n{dest_base}")
             if self.var_open_folder.get():
                 try: os.startfile(dest_base)
-                except: subprocess.Popen(f'explorer "{dest_base}"')
+                except Exception: subprocess.Popen(f'explorer "{dest_base}"')
         # 3秒後にインジケーターをidleに戻す
         self.after(3000, lambda: self._set_indicator("idle", "待機中", ""))
         # 成功したものをキューから除去（削除設定なら既に消えている）
@@ -1726,7 +1902,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
     def _open_path(self, p):
         if os.path.exists(p):
             try: os.startfile(p)
-            except: subprocess.Popen(f'explorer \"{p}\"')
+            except Exception: subprocess.Popen(f'explorer \"{p}\"')
         else: messagebox.showwarning("見つかりません", f"パスが存在しません:\n{p}")
 
     def clear_history(self):
@@ -1836,7 +2012,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
             self._load_history_ui()
             if messagebox.askyesno("完了", f"圧縮が完了しました:\n{out}\n\nフォルダを開きますか？"):
                 try: os.startfile(os.path.dirname(out))
-                except: subprocess.Popen(f'explorer "{os.path.dirname(out)}"')
+                except Exception: subprocess.Popen(f'explorer "{os.path.dirname(out)}"')
             self.after(3000, lambda: self._set_indicator("idle","待機中",""))
         else:
             self.c_progress.set(0); self.c_set_status(f"失敗: {err}"); self.c_log(f"失敗: {err}")
@@ -1894,12 +2070,12 @@ class SimpleExtractApp(TkinterDnD.Tk):
                     try:
                         canvas.move(pid, vx, vy)
                         # 回転は簡易
-                    except: pass
+                    except Exception: pass
                 self.after(30, lambda: animate(step+1))
             animate()
             try: ctypes.windll.user32.MessageBeep(0x00000040)
-            except: pass
-        except: pass
+            except Exception: pass
+        except Exception: pass
 
     def omakase_action(self):
         """おまかせボタン: キューがあればランダム解凍、なければ運勢とTips"""
@@ -1988,11 +2164,11 @@ class SimpleExtractApp(TkinterDnD.Tk):
             try:
                 self.btn_extract.configure(fg_color=th["primary"])
                 self.c_btn_compress.configure(fg_color=th["primary"])
-            except: pass
+            except Exception: pass
             self.show_toast(f"🎨 テーマ: {th['name']}", th["primary"])
             self.show_confetti()
             CONFIG.set("omakase_theme", key)
-        except: pass
+        except Exception: pass
 
     def show_help(self):
         messagebox.showinfo("使い方",
@@ -2002,7 +2178,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
         try:
             with open(os.path.join(os.getenv("TEMP") or ".", "SimpleExtract_debug.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{datetime.now()}] handle_cli_arg argv={sys.argv}\n")
-        except: pass
+        except Exception: pass
         args=[a.strip('"') for a in sys.argv[1:] if not a.startswith("--")]
         flags=[a for a in sys.argv[1:] if a.startswith("--")]
         if args:
