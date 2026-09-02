@@ -71,7 +71,7 @@ EXT_DESCRIPTIONS = {
 EXT_ICONS = {".zip": "📦", ".7z": "🗜️", ".rar": "📚", ".tar": "📦", ".gz": "🗜️", ".tgz": "🗜️", ".bz2": "🗜️"}
 
 APP_NAME = "SimpleExtract"
-APP_VERSION = "1.5.7"
+APP_VERSION = "1.6.0"
 # おまかせメッセージ
 OMAKASE_MESSAGES = [
     "🎉 今日の運勢: 大吉！解凍も絶好調！",
@@ -83,6 +83,24 @@ OMAKASE_MESSAGES = [
     "🎊 おまかせ解凍、発動！",
     "💎 レアなファイルが出たかも？",
 ]
+OMAKASE_THEMES = {
+    "sakura": {"name": "🌸 さくら", "primary": "#ec4899", "bg": "#fff1f2", "card": "#ffffff"},
+    "ocean": {"name": "🌊 オーシャン", "primary": "#0ea5e9", "bg": "#f0f9ff", "card": "#ffffff"},
+    "forest": {"name": "🌲 フォレスト", "primary": "#10b981", "bg": "#f0fdf4", "card": "#ffffff"},
+    "sunset": {"name": "🌅 サンセット", "primary": "#f97316", "bg": "#fff7ed", "card": "#ffffff"},
+    "midnight": {"name": "🌙 ミッドナイト", "primary": "#6366f1", "bg": "#1e1b4b", "card": "#312e81"},
+    "default": {"name": "💙 デフォルト", "primary": "#2b6ff0", "bg": "#f5f7fb", "card": "#ffffff"},
+}
+ORGANIZE_CATEGORIES = {
+    "Images": {".png",".jpg",".jpeg",".gif",".bmp",".webp",".tiff",".svg",".psd"},
+    "Documents": {".pdf",".docx",".doc",".txt",".md",".rtf",".odt",".tex"},
+    "Spreadsheets": {".xlsx",".xls",".csv",".ods"},
+    "Presentations": {".pptx",".ppt",".odp"},
+    "Archives": {".zip",".7z",".rar",".tar",".gz"},
+    "Videos": {".mp4",".avi",".mov",".mkv",".wmv",".flv"},
+    "Audio": {".mp3",".wav",".flac",".aac",".ogg"},
+    "Code": {".py",".js",".html",".css",".json",".xml",".cpp",".java"},
+}
 PROGID_PREFIX = "SimpleExtract"
 
 # ── フォントアンチエイリアス & DPI ──
@@ -1137,6 +1155,8 @@ class SimpleExtractApp(TkinterDnD.Tk):
         ctk.CTkCheckBox(right_pane, text="展開後にフォルダを開く", variable=self.var_open_folder, font=("BIZ UDGothic",10), text_color=C["TEXT"], fg_color=COLOR_PRIMARY, command=self.save_settings).pack(anchor="w", padx=14, pady=(8,2))
         ctk.CTkCheckBox(right_pane, text="展開後にアーカイブを削除", variable=self.var_delete, font=("BIZ UDGothic",10), text_color=COLOR_DANGER, fg_color=COLOR_DANGER, command=self.save_settings).pack(anchor="w", padx=14, pady=2)
         ctk.CTkCheckBox(right_pane, text="完了時に通知を表示", variable=self.var_notify, font=("BIZ UDGothic",10), text_color=C["TEXT"], fg_color=COLOR_PRIMARY, command=self.save_settings).pack(anchor="w", padx=14, pady=2)
+        self.var_organize=ctk.BooleanVar(value=CONFIG.get("organize", False))
+        ctk.CTkCheckBox(right_pane, text="✨ おまかせ整理（種類別にフォルダ分け）", variable=self.var_organize, font=("BIZ UDGothic",10), text_color=C["TEXT"], fg_color="#f59e0b", hover_color="#d97706", command=self.save_settings).pack(anchor="w", padx=14, pady=2)
 
         ctk.CTkLabel(right_pane, text="同名ファイル", font=("BIZ UDGothic",10,"bold"), text_color=C["TEXT"]).pack(anchor="w", padx=14, pady=(8,2))
         self.overwrite_var=ctk.StringVar(value=CONFIG.get("overwrite_mode","smart"))
@@ -1290,6 +1310,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
         CONFIG.set("open_folder", bool(self.var_open_folder.get()))
         CONFIG.set("delete_after", bool(self.var_delete.get()))
         CONFIG.set("notifications", bool(self.var_notify.get()))
+        CONFIG.set("organize", bool(self.var_organize.get()))
         CONFIG.set("overwrite_mode", self.overwrite_var.get())
 
     def on_dest_change(self):
@@ -1643,6 +1664,12 @@ class SimpleExtractApp(TkinterDnD.Tk):
                 CONFIG.add_history(arch, dest_dir, ok)
                 if ok:
                     success+=1
+                    # おまかせ整理
+                    try:
+                        do_org = CONFIG.get("organize", False)
+                    except: do_org = False
+                    if do_org:
+                        self.after(0, lambda d=dest_dir: self.organize_extracted(d))
                     if self.var_delete.get() and os.path.exists(arch):
                         try: os.remove(arch); log_cb(f"元アーカイブを削除: {arch}")
                         except Exception as e: log_cb(f"削除失敗: {e}")
@@ -1924,6 +1951,48 @@ class SimpleExtractApp(TkinterDnD.Tk):
             # 裏コマンド: 5回おまかせで隠しテーマ？
             cnt = CONFIG.get("omakase_count", 0) + 1
             CONFIG.set("omakase_count", cnt)
+            # 5回ごとにテーマおまかせ
+            if cnt % 5 == 0:
+                self.after(1000, self.apply_omakase_theme)
+
+    def organize_extracted(self, dest_dir):
+        try:
+            moved=0
+            for fname in os.listdir(dest_dir):
+                fpath=os.path.join(dest_dir, fname)
+                if os.path.isdir(fpath): continue
+                ext=pathlib.Path(fname).suffix.lower()
+                cat=None
+                for c, exts in ORGANIZE_CATEGORIES.items():
+                    if ext in exts:
+                        cat=c; break
+                if cat:
+                    d=os.path.join(dest_dir, cat)
+                    os.makedirs(d, exist_ok=True)
+                    dst=os.path.join(d, fname)
+                    if os.path.exists(dst):
+                        base, e=os.path.splitext(fname)
+                        dst=os.path.join(d, f"{base}_1{e}")
+                    shutil.move(fpath, dst); moved+=1
+            if moved>0:
+                self.log(f"✨ おまかせ整理: {moved}件を種類別に整理")
+                self.show_toast(f"✨ {moved}件を整理しました", "#f59e0b")
+        except Exception as e:
+            self.log(f"整理失敗: {e}")
+
+    def apply_omakase_theme(self):
+        try:
+            key=random.choice(list(OMAKASE_THEMES.keys()))
+            th=OMAKASE_THEMES[key]
+            # ボタンの色を変える
+            try:
+                self.btn_extract.configure(fg_color=th["primary"])
+                self.c_btn_compress.configure(fg_color=th["primary"])
+            except: pass
+            self.show_toast(f"🎨 テーマ: {th['name']}", th["primary"])
+            self.show_confetti()
+            CONFIG.set("omakase_theme", key)
+        except: pass
 
     def show_help(self):
         messagebox.showinfo("使い方",
