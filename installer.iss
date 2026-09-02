@@ -1,6 +1,6 @@
 ; SimpleExtract Installer - Inno Setup 6
 #define MyAppName "SimpleExtract"
-#define MyAppVersion "1.6.0"
+#define MyAppVersion "1.6.1"
 #define MyAppPublisher "SimpleExtract"
 #define MyAppURL "https://github.com/simpleextract"
 #define MyAppExeName "SimpleExtract.exe"

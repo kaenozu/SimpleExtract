@@ -74,7 +74,7 @@ EXT_DESCRIPTIONS = {
 EXT_ICONS = {".zip": "📦", ".7z": "🗜️", ".rar": "📚", ".tar": "📦", ".gz": "🗜️", ".tgz": "🗜️", ".bz2": "🗜️"}
 
 APP_NAME = "SimpleExtract"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 # おまかせメッセージ
 OMAKASE_MESSAGES = [
     "🎉 今日の運勢: 大吉！解凍も絶好調！",
@@ -1256,6 +1256,15 @@ class SimpleExtractApp(TkinterDnD.Tk):
         self.file_label.pack(pady=(4,2), padx=14)
 
         ctk.CTkLabel(left, text="内容プレビュー", font=("BIZ UDGothic",11,"bold"), text_color=C["TEXT"]).pack(anchor="w", padx=14, pady=(4,2))
+        # 検索バー（おまかせ実装）
+        search_frame=ctk.CTkFrame(left, fg_color="transparent"); search_frame.pack(fill="x", padx=14, pady=(2,4))
+        self.search_entry=ctk.CTkEntry(search_frame, placeholder_text="🔍 アーカイブ内を検索... (ファイル名)", font=("BIZ UDGothic",10), height=28, border_color=C["BORDER"])
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0,6))
+        self.search_entry.bind("<KeyRelease>", self.on_search)
+        self.search_entry.bind("<Escape>", lambda e: self.clear_search())
+        ctk.CTkButton(search_frame, text="✕", width=28, height=28, fg_color="white", text_color=C["TEXT"], hover_color=C["HOVER"], border_width=1, border_color=C["BORDER"], font=("BIZ UDGothic",10), command=self.clear_search).pack(side="right")
+        self.search_info=ctk.CTkLabel(left, text="", font=("BIZ UDGothic",9), text_color=C["SUB"], anchor="w")
+        self.search_info.pack(fill="x", padx=14, pady=(0,2))
         tree_frame=ctk.CTkFrame(left, fg_color="transparent"); tree_frame.pack(fill="both", expand=True, padx=10, pady=(0,6))
         style=ttk.Style(self); style.theme_use("clam")
         bg = C["CARD"] if CONFIG.get("theme")=="light" else "#1e293b"
@@ -1758,6 +1767,41 @@ class SimpleExtractApp(TkinterDnD.Tk):
         # バイナリ
         self.preview_img_label.configure(text="📦", image="")
         self.preview_text_box.configure(state="normal"); self.preview_text_box.delete("1.0","end"); self.preview_text_box.insert("end", f"バイナリファイル ({human_size(len(data))})\nプレビューできません"); self.preview_text_box.configure(state="disabled")
+
+    def on_search(self, event=None):
+        q=self.search_entry.get().strip().lower()
+        if not hasattr(self, 'current_items') or not self.current_items:
+            return
+        self.tree.delete(*self.tree.get_children())
+        if not q:
+            # 全件表示
+            for name,size,is_dir,dt,enc in self.current_items[:500]:
+                icon="📁" if is_dir else ("🔒" if enc else "📄")
+                typ="フォルダ" if is_dir else ("暗号化" if enc else "ファイル")
+                sz="-" if is_dir else human_size(size)
+                tag="enc" if enc else ""
+                self.tree.insert("", "end", text=f"{icon} {name}", values=(sz, typ), tags=(tag,))
+            self.search_info.configure(text="")
+            return
+        # フィルタ
+        matched=[]
+        for item in self.current_items:
+            name=item[0]
+            if q in name.lower():
+                matched.append(item)
+        for name,size,is_dir,dt,enc in matched[:500]:
+            icon="📁" if is_dir else ("🔒" if enc else "📄")
+            typ="フォルダ" if is_dir else ("暗号化" if enc else "ファイル")
+            sz="-" if is_dir else human_size(size)
+            self.tree.insert("", "end", text=f"{icon} {name}", values=(sz, typ))
+        self.search_info.configure(text=f"🔍 {len(matched)}件ヒット / {len(self.current_items)}件中")
+        if not matched:
+            self.search_info.configure(text=f"🔍 該当なし: '{q}'")
+
+    def clear_search(self):
+        self.search_entry.delete(0, "end")
+        self.on_search()
+        self.search_info.configure(text="")
 
     def get_dest_dir(self):
         m=self.dest_mode.get()
