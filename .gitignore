@@ -1,0 +1,35 @@
+# PyInstaller
+build/
+dist/
+dist-installer/
+*.spec
+*.pyinstaller/
+!assets/app.manifest
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.venv/
+venv/
+*.egg-info/
+pip-log.txt
+
+# OS
+Thumbs.db
+Desktop.ini
+*.lnk
+nul
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# App data (local config, not repo)
+# dist-installer/ はリリース成果物だが、通常はGit管理外。必要ならコメントアウト
+# dist-installer/
